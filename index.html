@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sandip Banerjee — Technical Program Manager</title>
+    <meta name="description" content="Sandip Banerjee — technology and program leader delivering platform modernization, product launches and Agile transformation at enterprise scale." />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+
+    <!-- Link previews (LinkedIn, Slack, etc.). Replace the domain once you have one. -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Sandip Banerjee — Technical Program Manager" />
+    <meta property="og:description" content="I turn strategy into shipped programs." />
+    <meta property="og:image" content="https://YOUR-DOMAIN.com/images/profile.jpg" />
+    <meta name="twitter:card" content="summary" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap"
+    />
+
+    <!-- Set the theme before React loads so the page never flashes the wrong colors. -->
+    <script>
+      (function () {
+        var theme;
+        try { theme = localStorage.getItem("theme"); } catch (e) {}
+        if (!theme) theme = window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        if (theme === "dark") document.documentElement.classList.add("dark");
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
