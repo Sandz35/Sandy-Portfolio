@@ -1,16 +1,37 @@
-# React + Vite
+# Sandip Banerjee — Portfolio
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Personal portfolio of Sandip Banerjee
 
-Currently, two official plugins are available:
+**Live site:** https://sandieportfolio.com
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Tech stack
 
-## React Compiler
+- **Frontend:** React, Vite, Tailwind CSS
+- **Hosting:** AWS S3 + CloudFront, custom domain via Route 53
+- **Contact form:** AWS Lambda, DynamoDB, SES
+- **Infrastructure:** AWS SAM (`infra/template.yaml`)
+- **CI/CD:** GitHub Actions deploys every push to `main`
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Run locally
 
-## Expanding the Oxlint configuration
+```bash
+npm install
+npm run dev        # http://localhost:5173
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+To test the contact form locally, copy `.env.example` to `.env.local` and set `VITE_CONTACT_URL`.
+
+## Project structure
+
+```
+src/data/content.js       all site text
+src/components/           page sections
+backend/contact-lambda/   contact form handler
+infra/                    SAM template and config
+.github/workflows/        deploy pipeline
+```
+
+## Deploy
+
+- **Site:** merge to `main`; GitHub Actions builds and uploads it.
+- **AWS resources:** `cd infra` then `sam deploy` (only when `infra/` changes).
