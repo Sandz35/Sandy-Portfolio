@@ -8,7 +8,7 @@ export const profile = {
   intro:
     "Technology leader blending engineering roots with an IIM Lucknow MBA. I build high-performing teams and deliver platform modernization, product launches and Agile transformation at enterprise scale.",
   roles: ["Technical Program Manager", "Release Train Engineer", "Product & Delivery Leader"],
-  photo: "/images/Sandip.jpg",
+  photo: "/images/Sandip.webp",
   resume: "/resume.pdf",
   email: "sandipbanerjee.in@gmail.com",
   linkedin: "https://www.linkedin.com/in/sandipbanerjee1/",
