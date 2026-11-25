@@ -6,7 +6,7 @@ resolve_s3 = true
 s3_prefix = "sandy-portfolio"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
-parameter_overrides = "NotificationEmail=\"sandipbanerjee.in@gmail.com\" CreateSesIdentity=\"false\" DomainName=\"sandieportfolio.com\" DomainStage=\"live\" ReservedConcurrency=\"0\" GitHubRepo=\"Sandz35/Sandy-Portfolio\" CreateGitHubOidcProvider=\"true\""
+parameter_overrides = "NotificationEmail=\"sandipbanerjee.in@gmail.com\" CreateSesIdentity=\"false\" DomainName=\"sandieportfolio.com\" DomainStage=\"live\" ReservedConcurrency=\"0\" GitHubRepo=\"Sandz35@36485988/Sandy-Portfolio@1464321335\" CreateGitHubOidcProvider=\"true\""
 image_repositories = []
 
 [default.global.parameters]
