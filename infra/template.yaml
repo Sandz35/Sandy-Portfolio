@@ -1,0 +1,422 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Sandy-Portfolio - static site (S3 + CloudFront) and serverless contact form (Lambda + DynamoDB + SES)
+
+# Deploy from this folder (infra/) in your home region (e.g. us-east-2):
+#   sam deploy --guided        (first time)
+#   sam deploy                 (every change after that; settings live in samconfig.toml)
+# Custom domain (e.g. from Porkbun) in two passes: DomainStage=dns, point the registrar's
+# nameservers at the NameServers output, then DomainStage=live. See guide Part 9B.4.
+
+Parameters:
+  NotificationEmail:
+    Type: String
+    Default: YOUR_EMAIL
+    Description: Where contact-form messages are emailed (also used as the sender until you verify a domain)
+  CreateSesIdentity:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+    Description: "'true' creates the SES email identity (AWS emails you a verification link). Use 'false' if it is already verified."
+  DomainName:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^([a-z0-9-]+\.)+[a-z]{2,}$'
+    ConstraintDescription: lower-case apex domain like example.com (no https://, no www)
+    Description: Optional custom domain you own, e.g. example.com (leave empty to use the cloudfront.net address)
+  DomainStage:
+    Type: String
+    AllowedValues: ['off', 'dns', 'live']
+    Default: 'off'
+    Description: "off = no custom domain; dns = create the Route 53 zone (then set its nameservers at your registrar); live = certificate, CloudFront aliases, DNS records and domain email"
+  ReservedConcurrency:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 10
+    Description: Max simultaneous contact-form runs (caps cost if a bot floods the form). 0 = no cap. Try 2; new accounts may not allow reserving.
+  GitHubRepo:
+    Type: String
+    Default: Sandz35/Sandy-Portfolio
+    Description: owner/repo allowed to deploy the site from its main branch
+  CreateGitHubOidcProvider:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+    Description: "'false' if this AWS account already has the GitHub OIDC provider (one per account)"
+
+Conditions:
+  ZoneOn: !And
+    - !Not [!Equals [!Ref DomainName, '']]
+    - !Not [!Equals [!Ref DomainStage, 'off']]
+  Live: !And
+    - !Condition ZoneOn
+    - !Equals [!Ref DomainStage, 'live']
+  MakeSesIdentity: !Equals [!Ref CreateSesIdentity, 'true']
+  CapConcurrency: !Not [!Equals [!Ref ReservedConcurrency, 0]]
+  MakeOidcProvider: !Equals [!Ref CreateGitHubOidcProvider, 'true']
+
+Resources:
+  # ---------- Website: private S3 bucket behind CloudFront ----------
+  SiteBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+
+  SiteOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AWS::StackName}-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  SiteDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub '${AWS::StackName} portfolio'
+        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_100 # North America + Europe edges: the cheapest class
+        Aliases: !If
+          - Live
+          - [!Ref DomainName, !Sub 'www.${DomainName}']
+          - !Ref AWS::NoValue
+        ViewerCertificate: !If
+          - Live
+          - AcmCertificateArn: !GetAtt SiteCertificate.CertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
+        Origins:
+          - Id: SiteBucketOrigin
+            DomainName: !GetAtt SiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt SiteOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: SiteBucketOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          AllowedMethods: [GET, HEAD]
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Managed-CachingOptimized
+          ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03 # Managed-SecurityHeadersPolicy
+
+  SiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref SiteBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${SiteBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${SiteDistribution}'
+
+  # ---------- Custom domain: Route 53 zone, certificate, DNS records ----------
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Condition: ZoneOn
+    Properties:
+      Name: !Ref DomainName
+
+  # CloudFront only accepts certificates from us-east-1, and this stack lives in your home
+  # region, so a small function requests the certificate in us-east-1, adds its DNS
+  # validation records to the zone, and waits until AWS issues it.
+  CertificateFunction:
+    Type: AWS::Serverless::Function
+    Condition: Live
+    Properties:
+      Runtime: nodejs22.x
+      Architectures: [arm64]
+      Handler: index.handler
+      Timeout: 900
+      MemorySize: 128
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: [acm:RequestCertificate, acm:DescribeCertificate, acm:DeleteCertificate]
+              Resource: '*'
+            - Effect: Allow
+              Action: route53:ChangeResourceRecordSets
+              Resource: !Sub 'arn:aws:route53:::hostedzone/${HostedZone}'
+      InlineCode: |
+        const { ACMClient, RequestCertificateCommand, DescribeCertificateCommand, DeleteCertificateCommand } = require('@aws-sdk/client-acm');
+        const { Route53Client, ChangeResourceRecordSetsCommand } = require('@aws-sdk/client-route-53');
+        const acm = new ACMClient({ region: 'us-east-1' }); // CloudFront reads certificates only from us-east-1
+        const r53 = new Route53Client({});
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+        async function respond(event, status, physicalId, data, reason) {
+          const body = JSON.stringify({
+            Status: status, Reason: reason || 'See CloudWatch logs', PhysicalResourceId: physicalId,
+            StackId: event.StackId, RequestId: event.RequestId, LogicalResourceId: event.LogicalResourceId, Data: data || {},
+          });
+          await fetch(event.ResponseURL, { method: 'PUT', headers: { 'content-type': '' }, body });
+        }
+
+        async function issue(domain, zoneId, deadline) {
+          const { CertificateArn: arn } = await acm.send(new RequestCertificateCommand({
+            DomainName: domain, SubjectAlternativeNames: [`www.${domain}`], ValidationMethod: 'DNS',
+            IdempotencyToken: domain.replace(/[^a-zA-Z0-9]/g, '').slice(0, 32),
+          }));
+          console.log('Certificate', arn);
+          let added = false;
+          while (Date.now() < deadline) {
+            const { Certificate: c } = await acm.send(new DescribeCertificateCommand({ CertificateArn: arn }));
+            if (c.Status === 'ISSUED') return arn;
+            if (c.Status !== 'PENDING_VALIDATION') throw new Error(`Certificate status ${c.Status}`);
+            const opts = c.DomainValidationOptions || [];
+            if (!added && opts.length && opts.every((o) => o.ResourceRecord)) {
+              const records = [...new Map(opts.map((o) => [o.ResourceRecord.Name, o.ResourceRecord])).values()];
+              await r53.send(new ChangeResourceRecordSetsCommand({
+                HostedZoneId: zoneId,
+                ChangeBatch: { Changes: records.map((r) => ({ Action: 'UPSERT', ResourceRecordSet: {
+                  Name: r.Name, Type: r.Type, TTL: 300, ResourceRecords: [{ Value: r.Value }] } })) },
+              }));
+              added = true;
+              console.log('Validation records added');
+            }
+            await sleep(15000);
+          }
+          throw new Error('Certificate still pending validation. Are the Route 53 nameservers saved at your registrar and live? Check with: nslookup -type=NS ' + domain + ' 8.8.8.8, then deploy again.');
+        }
+
+        exports.handler = async (event, context) => {
+          const deadline = Date.now() + context.getRemainingTimeInMillis() - 30000;
+          const { DomainName: domain, HostedZoneId: zoneId } = event.ResourceProperties;
+          try {
+            if (event.RequestType === 'Delete') {
+              const arn = event.PhysicalResourceId;
+              while (arn && arn.startsWith('arn:aws:acm:') && Date.now() < deadline) {
+                try { await acm.send(new DeleteCertificateCommand({ CertificateArn: arn })); break; }
+                catch (e) {
+                  if (e.name === 'ResourceNotFoundException') break;
+                  if (e.name !== 'ResourceInUseException') throw e;
+                  await sleep(30000); // CloudFront still releasing it
+                }
+              }
+              return await respond(event, 'SUCCESS', arn);
+            }
+            const arn = await issue(domain, zoneId, deadline);
+            await respond(event, 'SUCCESS', arn, { CertificateArn: arn });
+          } catch (e) {
+            console.error(e);
+            const deleting = event.RequestType === 'Delete'; // never block a stack delete
+            await respond(event, deleting ? 'SUCCESS' : 'FAILED', event.PhysicalResourceId || 'not-created', {}, String(e.message || e).slice(0, 400));
+          }
+        };
+
+  SiteCertificate:
+    Type: Custom::DnsValidatedCertificate
+    Condition: Live
+    Properties:
+      ServiceToken: !GetAtt CertificateFunction.Arn
+      ServiceTimeout: 960
+      DomainName: !Ref DomainName
+      HostedZoneId: !Ref HostedZone
+
+  SiteRecords:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: Live
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      RecordSets:
+        - Name: !Ref DomainName
+          Type: A
+          AliasTarget:
+            DNSName: !GetAtt SiteDistribution.DomainName
+            HostedZoneId: Z2FDTNDATAQYW2 # fixed zone ID for every CloudFront distribution
+        - Name: !Ref DomainName
+          Type: AAAA
+          AliasTarget:
+            DNSName: !GetAtt SiteDistribution.DomainName
+            HostedZoneId: Z2FDTNDATAQYW2
+        - Name: !Sub 'www.${DomainName}'
+          Type: A
+          AliasTarget:
+            DNSName: !GetAtt SiteDistribution.DomainName
+            HostedZoneId: Z2FDTNDATAQYW2
+        - Name: !Sub 'www.${DomainName}'
+          Type: AAAA
+          AliasTarget:
+            DNSName: !GetAtt SiteDistribution.DomainName
+            HostedZoneId: Z2FDTNDATAQYW2
+
+  # Lets the contact form send from contact@yourdomain (better inbox delivery than a Gmail sender).
+  DomainEmailIdentity:
+    Type: AWS::SES::EmailIdentity
+    Condition: Live
+    Properties:
+      EmailIdentity: !Ref DomainName
+
+  DomainEmailRecords:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: Live
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      RecordSets:
+        - Name: !GetAtt DomainEmailIdentity.DkimDNSTokenName1
+          Type: CNAME
+          TTL: '1800'
+          ResourceRecords: [!GetAtt DomainEmailIdentity.DkimDNSTokenValue1]
+        - Name: !GetAtt DomainEmailIdentity.DkimDNSTokenName2
+          Type: CNAME
+          TTL: '1800'
+          ResourceRecords: [!GetAtt DomainEmailIdentity.DkimDNSTokenValue2]
+        - Name: !GetAtt DomainEmailIdentity.DkimDNSTokenName3
+          Type: CNAME
+          TTL: '1800'
+          ResourceRecords: [!GetAtt DomainEmailIdentity.DkimDNSTokenValue3]
+        - Name: !Sub '_dmarc.${DomainName}'
+          Type: TXT
+          TTL: '1800'
+          ResourceRecords: ['"v=DMARC1; p=none;"']
+
+  # ---------- Contact form: Lambda URL -> DynamoDB + SES ----------
+  MessagesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BillingMode: PAY_PER_REQUEST # on-demand: fractions of a cent at portfolio traffic
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  NotificationIdentity:
+    Type: AWS::SES::EmailIdentity
+    Condition: MakeSesIdentity
+    Properties:
+      EmailIdentity: !Ref NotificationEmail
+
+  ContactFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../backend/contact-lambda
+      Handler: index.handler
+      Runtime: nodejs22.x
+      Architectures: [arm64]
+      MemorySize: 128
+      Timeout: 10
+      ReservedConcurrentExecutions: !If [CapConcurrency, !Ref ReservedConcurrency, !Ref AWS::NoValue]
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref MessagesTable
+          TO_EMAIL: !Ref NotificationEmail
+          FROM_EMAIL: !If [Live, !Sub 'contact@${DomainName}', !Ref NotificationEmail]
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref MessagesTable
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action: ses:SendEmail
+              Resource: '*'
+      FunctionUrlConfig:
+        AuthType: NONE # SAM adds the public invoke permissions for you
+        Cors:
+          AllowOrigins:
+            - !Sub 'https://${SiteDistribution.DomainName}'
+            - http://localhost:5173
+            - !If [Live, !Sub 'https://${DomainName}', !Ref AWS::NoValue]
+            - !If [Live, !Sub 'https://www.${DomainName}', !Ref AWS::NoValue]
+          AllowMethods: [POST]
+          AllowHeaders: [content-type]
+          MaxAge: 86400
+
+  ContactFunctionLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ContactFunction}'
+      RetentionInDays: 14 # logs are kept forever (and billed) unless you set this
+
+  # ---------- GitHub Actions deploy role (OIDC, no stored keys) ----------
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: MakeOidcProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+
+  GitHubDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If
+                - MakeOidcProvider
+                - !Ref GitHubOidcProvider
+                - !Sub 'arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com'
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub 'repo:${GitHubRepo}:ref:refs/heads/main'
+      Policies:
+        - PolicyName: deploy-site
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ListBucket
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt SiteBucket.Arn
+              - Sid: WriteSiteFiles
+                Effect: Allow
+                Action: [s3:PutObject, s3:DeleteObject]
+                Resource: !Sub '${SiteBucket.Arn}/*'
+              - Sid: ClearCdnCache
+                Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${SiteDistribution}'
+
+Outputs:
+  SiteUrl:
+    Description: Your live site
+    Value: !If [Live, !Sub 'https://${DomainName}', !Sub 'https://${SiteDistribution.DomainName}']
+  S3Bucket:
+    Description: GitHub variable S3_BUCKET
+    Value: !Ref SiteBucket
+  CloudFrontDistributionId:
+    Description: GitHub variable CLOUDFRONT_DISTRIBUTION_ID
+    Value: !Ref SiteDistribution
+  ContactUrl:
+    Description: GitHub variable VITE_CONTACT_URL (and your .env.local)
+    Value: !GetAtt ContactFunctionUrl.FunctionUrl
+  AwsRoleArn:
+    Description: GitHub variable AWS_ROLE_ARN
+    Value: !GetAtt GitHubDeployRole.Arn
+  MessagesTableName:
+    Description: Where contact messages are stored
+    Value: !Ref MessagesTable
+  NameServers:
+    Condition: ZoneOn
+    Description: Enter these at your registrar (Porkbun > Details > Authoritative Nameservers), one per line
+    Value: !Join [' ', !GetAtt HostedZone.NameServers]
