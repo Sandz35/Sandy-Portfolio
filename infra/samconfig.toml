@@ -1,0 +1,13 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "sandy-portfolio"
+resolve_s3 = true
+s3_prefix = "sandy-portfolio"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "NotificationEmail=\"sandipbanerjee.in@gmail.com\" CreateSesIdentity=\"false\" DomainName=\"sandieportfolio.com\" DomainStage=\"live\" ReservedConcurrency=\"0\" GitHubRepo=\"Sandz35/Sandy-Portfolio\" CreateGitHubOidcProvider=\"true\""
+image_repositories = []
+
+[default.global.parameters]
+region = "us-east-2"
